@@ -1,0 +1,15 @@
+.vs/
+x64/
+Debug/
+Release/
+*.user
+*.VC.db
+*.VC.opendb
+*.suo
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.log
+*.tlog
+*.lastbuildstate
