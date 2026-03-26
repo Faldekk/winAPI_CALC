@@ -1,319 +1,450 @@
 ﻿#include <windows.h>
 #include <string>
-#include <sstream>
-#include <iomanip>
+#include <vector>
 #include <windowsx.h>
-#include <cmath>
+#include <cwctype>
+#include <cstring>
+#include "Resource.h"
+#include "CalcGlobal.h"
+#include "UICallbacks.h"
+#include "Modes.h"
 
-#define ID_DISPLAY 100
-#define ID_BTN_0   200
-#define ID_BTN_1   201
-#define ID_BTN_2   202
-#define ID_BTN_3   203
-#define ID_BTN_4   204
-#define ID_BTN_5   205
-#define ID_BTN_6   206
-#define ID_BTN_7   207
-#define ID_BTN_8   208
-#define ID_BTN_9   209
-#define ID_BTN_BCK 210
-#define ID_BTN_DOT 211
-#define ID_BTN_ADD 212
-#define ID_BTN_SUB 213
-#define ID_BTN_MUL 214
-#define ID_BTN_DIV 216
-#define ID_BTN_EQ  217
-#define ID_BTN_CLR 218
+int currentMode = 0;
+DataType currentDataType = DataType::Int64S;
+DisplayBase currentBase = DisplayBase::Decimal;
+bool windowAlwaysOnTop = false;
 
-HWND hDisplayEdit = nullptr;
+HWND hDisplayControl = nullptr;
+HWND hBitDisplay = nullptr;
+HWND hTypeComboBox = nullptr;
+std::vector<HWND> calculatorButtons;
+HACCEL hAccelerators = nullptr;
+
+HFONT hDisplayHistoryFont = nullptr;
+HFONT hDisplayMainFont = nullptr;
 
 std::wstring currentInput = L"0";
+std::wstring operationHistory;
+std::wstring precisionWarning;
+unsigned long long currentBitValue = 0;
 double firstOperandValue = 0.0;
 wchar_t currentOperator = 0;
 bool waitingForSecondOperand = false;
 bool justCalculated = false;
+bool programmerMode = false;
 
-std::wstring FormatDouble(double value)
+HWND hToolTip = nullptr;
+int hoveredBit = -1;
+
+constexpr int CommandCopy = 32774;
+constexpr int CommandPaste = 32773;
+
+std::wstring TrimSpaces(const std::wstring& text)
 {
-    if (std::isnan(value) || std::isinf(value))
-        return L"Error";
+    size_t left = 0;
+    size_t right = text.size();
 
-    std::wostringstream outputStream;
-    outputStream << std::fixed << std::setprecision(12) << value;
-    std::wstring formattedText = outputStream.str();
+    while (left < right && iswspace(text[left]))
+        left++;
 
-    while (!formattedText.empty() && formattedText.back() == L'0')
-        formattedText.pop_back();
+    while (right > left && iswspace(text[right - 1]))
+        right--;
 
-    if (!formattedText.empty() && formattedText.back() == L'.')
-        formattedText.pop_back();
-
-    if (formattedText.empty() || formattedText == L"-0")
-        formattedText = L"0";
-
-    return formattedText;
+    return text.substr(left, right - left);
 }
 
-void UpdateDisplay()
+unsigned long long MaskValue(unsigned long long value)
 {
-    SetWindowTextW(hDisplayEdit, currentInput.c_str());
+    int bits = DataTypeConverter::GetBitCount(currentDataType);
+    if (bits >= 64)
+        return value;
+    return value & ((1ULL << bits) - 1ULL);
 }
 
-double ToDouble(const std::wstring& inputText)
+void ChangeBase(HWND windowHandle, DisplayBase base)
 {
-    try
-    {
-        return std::stod(inputText);
-    }
-    catch (...)
-    {
-        return 0.0;
-    }
-}
+    currentBase = base;
 
-void ClearAll()
-{
-    currentInput = L"0";
-    firstOperandValue = 0.0;
-    currentOperator = 0;
-    waitingForSecondOperand = false;
-    justCalculated = false;
+    CheckMenuItem(GetMenu(windowHandle), UiIds::MenuBaseDec, MF_BYCOMMAND | (base == DisplayBase::Decimal ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(windowHandle), UiIds::MenuBaseHex, MF_BYCOMMAND | (base == DisplayBase::Hexadecimal ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(windowHandle), UiIds::MenuBaseOct, MF_BYCOMMAND | (base == DisplayBase::Octal ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(windowHandle), UiIds::MenuBaseBin, MF_BYCOMMAND | (base == DisplayBase::Binary ? MF_CHECKED : MF_UNCHECKED));
+
+    currentInput = DataTypeConverter::FormatValue(currentBitValue, currentDataType, currentBase);
+    UpdatePrecisionWarning();
     UpdateDisplay();
 }
 
-void AppendDigit(wchar_t digitChar)
+bool CopyToClip(HWND owner)
 {
-    if (justCalculated)
+    if (!OpenClipboard(owner))
+        return false;
+
+    EmptyClipboard();
+
+    SIZE_T sizeInBytes = (currentInput.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeInBytes);
+    if (!mem)
     {
-        currentInput = L"";
-        justCalculated = false;
-    }
-
-    if (waitingForSecondOperand)
-    {
-        currentInput = L"";
-        waitingForSecondOperand = false;
-    }
-
-    if (currentInput == L"0")
-        currentInput = L"";
-
-    currentInput += digitChar;
-    UpdateDisplay();
-}
-
-void AppendDot()
-{
-    if (justCalculated)
-    {
-        currentInput = L"0";
-        justCalculated = false;
-    }
-
-    if (waitingForSecondOperand)
-    {
-        currentInput = L"0";
-        waitingForSecondOperand = false;
-    }
-
-    if (currentInput.find(L'.') == std::wstring::npos)
-    {
-        currentInput += L'.';
-        UpdateDisplay();
-    }
-}
-
-void BackspaceInput()
-{
-    if (currentInput == L"Error")
-    {
-        ClearAll();
-        return;
-    }
-
-    if (waitingForSecondOperand)
-        return;
-
-    if (currentInput.size() > 1)
-    {
-        currentInput.pop_back();
-        if (currentInput == L"-")
-            currentInput = L"0";
-    }
-    else
-    {
-        currentInput = L"0";
-    }
-
-    justCalculated = false;
-    UpdateDisplay();
-}
-
-bool Calculate()
-{
-    double secondOperandValue = ToDouble(currentInput);
-    double calculationResult = 0.0;
-
-    switch (currentOperator)
-    {
-    case L'+':
-        calculationResult = firstOperandValue + secondOperandValue;
-        break;
-    case L'-':
-        calculationResult = firstOperandValue - secondOperandValue;
-        break;
-    case L'*':
-        calculationResult = firstOperandValue * secondOperandValue;
-        break;
-    case L'/':
-        if (secondOperandValue == 0.0)
-        {
-            currentInput = L"Error";
-            firstOperandValue = 0.0;
-            currentOperator = 0;
-            waitingForSecondOperand = false;
-            justCalculated = true;
-            UpdateDisplay();
-            return false;
-        }
-        calculationResult = firstOperandValue / secondOperandValue;
-        break;
-    default:
+        CloseClipboard();
         return false;
     }
 
-    currentInput = FormatDouble(calculationResult);
-    firstOperandValue = calculationResult;
-    currentOperator = 0;
-    waitingForSecondOperand = false;
-    justCalculated = true;
-    UpdateDisplay();
+    void* ptr = GlobalLock(mem);
+    if (!ptr)
+    {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+
+    memcpy(ptr, currentInput.c_str(), sizeInBytes);
+    GlobalUnlock(mem);
+
+    if (!SetClipboardData(CF_UNICODETEXT, mem))
+    {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+
+    CloseClipboard();
     return true;
 }
 
-void SetOperation(wchar_t operationChar)
+bool TryParseInt(const std::wstring& sourceText, unsigned long long& outValue)
 {
-    if (currentInput == L"Error")
-        ClearAll();
+    std::wstring text = TrimSpaces(sourceText);
+    if (text.empty())
+        return false;
 
-    if (currentOperator != 0 && !waitingForSecondOperand)
+    bool negative = false;
+    int base = 10;
+
+    if (text[0] == L'-')
     {
-        if (!Calculate())
-            return;
+        negative = true;
+        text.erase(0, 1);
     }
 
-    firstOperandValue = ToDouble(currentInput);
-    currentOperator = operationChar;
-    waitingForSecondOperand = true;
-    justCalculated = false;
+    if (text.size() >= 2 && text[0] == L'0' && (text[1] == L'x' || text[1] == L'X'))
+    {
+        base = 16;
+        text.erase(0, 2);
+    }
+    else if (!text.empty() && (text[0] == L'b' || text[0] == L'B'))
+    {
+        base = 2;
+        text.erase(0, 1);
+    }
+    else if (!text.empty() && (text[0] == L'o' || text[0] == L'O'))
+    {
+        base = 8;
+        text.erase(0, 1);
+    }
+    else
+    {
+        if (currentBase == DisplayBase::Hexadecimal) base = 16;
+        if (currentBase == DisplayBase::Octal) base = 8;
+        if (currentBase == DisplayBase::Binary) base = 2;
+    }
+
+    if (text.empty())
+        return false;
+
+    size_t used = 0;
+
+    if (negative)
+    {
+        long long v = std::stoll(L"-" + text, &used, base);
+        if (used != text.size() + 1)
+            return false;
+        outValue = static_cast<unsigned long long>(v);
+    }
+    else
+    {
+        outValue = std::stoull(text, &used, base);
+        if (used != text.size())
+            return false;
+    }
+
+    outValue = MaskValue(outValue);
+    return true;
 }
 
-void CreateCalcButton(HWND parentWindow, const wchar_t* buttonText, int buttonId, int positionX, int positionY, int width, int height)
+bool PasteFromClip(HWND owner)
 {
-    CreateWindowW(
-        L"BUTTON", buttonText,
-        WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-        positionX, positionY, width, height,
-        parentWindow, (HMENU)(INT_PTR)buttonId,
-        (HINSTANCE)GetWindowLongPtr(parentWindow, GWLP_HINSTANCE),
-        nullptr
-    );
+    if (!OpenClipboard(owner))
+        return false;
+
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    if (!h)
+    {
+        CloseClipboard();
+        return false;
+    }
+
+    const wchar_t* data = static_cast<const wchar_t*>(GlobalLock(h));
+    if (!data)
+    {
+        CloseClipboard();
+        return false;
+    }
+
+    std::wstring pasted(data);
+    GlobalUnlock(h);
+    CloseClipboard();
+
+    pasted = TrimSpaces(pasted);
+    if (pasted.empty())
+        return false;
+
+    try
+    {
+        if (DataTypeConverter::IsFloat(currentDataType))
+        {
+            for (auto& c : pasted)
+                if (c == L',') c = L'.';
+
+            double check = std::stod(pasted);
+            if (std::isnan(check) || std::isinf(check))
+                return false;
+
+            currentBitValue = DataTypeConverter::ParseValue(pasted, currentDataType, DisplayBase::Decimal);
+            currentInput = DataTypeConverter::FormatValue(currentBitValue, currentDataType, currentBase);
+        }
+        else
+        {
+            unsigned long long v = 0;
+            if (!TryParseInt(pasted, v))
+                return false;
+
+            currentBitValue = v;
+            currentInput = DataTypeConverter::FormatValue(currentBitValue, currentDataType, currentBase);
+        }
+
+        operationHistory.clear();
+        waitingForSecondOperand = false;
+        justCalculated = false;
+        UpdatePrecisionWarning();
+        UpdateDisplay();
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
 }
 
-LRESULT CALLBACK WndProc(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK MainWndProc(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
     case WM_CREATE:
     {
-        hDisplayEdit = CreateWindowW(
-            L"EDIT", L"0",
-            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_RIGHT | ES_READONLY,
-            8, 10, 304, 56,
-            windowHandle, (HMENU)(INT_PTR)ID_DISPLAY,
+        SetMenu(windowHandle, CreateApplicationMenu());
+
+        hDisplayControl = CreateWindowExW(
+            0, DISPLAY_CLASS_NAME, L"",
+            WS_VISIBLE | WS_CHILD,
+            0, 0, 0, 0,
+            windowHandle,
+            (HMENU)(INT_PTR)UiIds::Display,
             ((LPCREATESTRUCT)lParam)->hInstance,
-            nullptr
-        );
+            nullptr);
 
-        HFONT displayFont = CreateFontW(
-            24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, VARIABLE_PITCH, L"CalcUI"
-        );
+        hTypeComboBox = CreateWindowW(
+            L"COMBOBOX", L"",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST | CBS_NOINTEGRALHEIGHT,
+            0, 0, 0, 0,
+            windowHandle,
+            (HMENU)(INT_PTR)UiIds::ComboDataType,
+            (HINSTANCE)GetWindowLongPtr(windowHandle, GWLP_HINSTANCE),
+            nullptr);
 
-        SendMessageW(hDisplayEdit, WM_SETFONT, (WPARAM)displayFont, TRUE);
+        SendMessageW(hTypeComboBox, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        SendMessageW(hTypeComboBox, CB_SETITEMHEIGHT, (WPARAM)-1, 24);
+        SendMessageW(hTypeComboBox, CB_SETITEMHEIGHT, 0, 22);
 
-        const int buttonWidth = 70;
-        const int buttonHeight = 55;
-        const int buttonGap = 8;
-        const int buttonsStartX = 8;
-        const int buttonsStartY = 80;
+        for (int i = 0; i <= 10; ++i)
+            SendMessageW(hTypeComboBox, CB_ADDSTRING, 0, (LPARAM)DataTypeConverter::GetTypeName(static_cast<DataType>(i)));
 
-        CreateCalcButton(windowHandle, L"C", ID_BTN_CLR, buttonsStartX + 0 * (buttonWidth + buttonGap), buttonsStartY + 0 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"/", ID_BTN_DIV, buttonsStartX + 1 * (buttonWidth + buttonGap), buttonsStartY + 0 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"*", ID_BTN_MUL, buttonsStartX + 2 * (buttonWidth + buttonGap), buttonsStartY + 0 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"-", ID_BTN_SUB, buttonsStartX + 3 * (buttonWidth + buttonGap), buttonsStartY + 0 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
+        SendMessageW(hTypeComboBox, CB_SETDROPPEDWIDTH, 260, 0);
+        SendMessageW(hTypeComboBox, CB_SETCURSEL, static_cast<WPARAM>(currentDataType), 0);
 
-        CreateCalcButton(windowHandle, L"7", ID_BTN_7, buttonsStartX + 0 * (buttonWidth + buttonGap), buttonsStartY + 1 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"8", ID_BTN_8, buttonsStartX + 1 * (buttonWidth + buttonGap), buttonsStartY + 1 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"9", ID_BTN_9, buttonsStartX + 2 * (buttonWidth + buttonGap), buttonsStartY + 1 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"+", ID_BTN_ADD, buttonsStartX + 3 * (buttonWidth + buttonGap), buttonsStartY + 1 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
+        hBitDisplay = CreateWindowExW(
+            0, BIT_DISPLAY_CLASS_NAME, L"",
+            WS_VISIBLE | WS_CHILD,
+            0, 0, 0, 0,
+            windowHandle,
+            (HMENU)(INT_PTR)UiIds::BitDisplay,
+            ((LPCREATESTRUCT)lParam)->hInstance,
+            nullptr);
 
-        CreateCalcButton(windowHandle, L"4", ID_BTN_4, buttonsStartX + 0 * (buttonWidth + buttonGap), buttonsStartY + 2 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"5", ID_BTN_5, buttonsStartX + 1 * (buttonWidth + buttonGap), buttonsStartY + 2 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"6", ID_BTN_6, buttonsStartX + 2 * (buttonWidth + buttonGap), buttonsStartY + 2 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"=", ID_BTN_EQ, buttonsStartX + 3 * (buttonWidth + buttonGap), buttonsStartY + 2 * (buttonHeight + buttonGap), buttonWidth, buttonHeight * 2 + buttonGap);
+        CreateCalcButton(windowHandle, L"C", UiIds::ButtonClear);
+        CreateCalcButton(windowHandle, L"←", UiIds::ButtonBackspace);
+        CreateCalcButton(windowHandle, L"/", UiIds::ButtonDiv);
+        CreateCalcButton(windowHandle, L"*", UiIds::ButtonMul);
 
-        CreateCalcButton(windowHandle, L"1", ID_BTN_1, buttonsStartX + 0 * (buttonWidth + buttonGap), buttonsStartY + 3 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"2", ID_BTN_2, buttonsStartX + 1 * (buttonWidth + buttonGap), buttonsStartY + 3 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"3", ID_BTN_3, buttonsStartX + 2 * (buttonWidth + buttonGap), buttonsStartY + 3 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
+        CreateCalcButton(windowHandle, L"7", UiIds::Button7);
+        CreateCalcButton(windowHandle, L"8", UiIds::Button8);
+        CreateCalcButton(windowHandle, L"9", UiIds::Button9);
+        CreateCalcButton(windowHandle, L"-", UiIds::ButtonSub);
 
-        CreateCalcButton(windowHandle, L"0", ID_BTN_0, buttonsStartX + 0 * (buttonWidth + buttonGap), buttonsStartY + 4 * (buttonHeight + buttonGap), buttonWidth * 2 + buttonGap, buttonHeight);
-        CreateCalcButton(windowHandle, L".", ID_BTN_DOT, buttonsStartX + 2 * (buttonWidth + buttonGap), buttonsStartY + 4 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
-        CreateCalcButton(windowHandle, L"<-", ID_BTN_BCK, buttonsStartX + 3 * (buttonWidth + buttonGap), buttonsStartY + 4 * (buttonHeight + buttonGap), buttonWidth, buttonHeight);
+        CreateCalcButton(windowHandle, L"4", UiIds::Button4);
+        CreateCalcButton(windowHandle, L"5", UiIds::Button5);
+        CreateCalcButton(windowHandle, L"6", UiIds::Button6);
+        CreateCalcButton(windowHandle, L"+", UiIds::ButtonAdd);
 
+        CreateCalcButton(windowHandle, L"1", UiIds::Button1);
+        CreateCalcButton(windowHandle, L"2", UiIds::Button2);
+        CreateCalcButton(windowHandle, L"3", UiIds::Button3);
+
+        CreateCalcButton(windowHandle, L"A", UiIds::ButtonA);
+        CreateCalcButton(windowHandle, L"B", UiIds::ButtonB);
+        CreateCalcButton(windowHandle, L"C", UiIds::ButtonCHex);
+        CreateCalcButton(windowHandle, L"D", UiIds::ButtonD);
+
+        CreateCalcButton(windowHandle, L"0", UiIds::Button0);
+        CreateCalcButton(windowHandle, L"E", UiIds::ButtonE);
+        CreateCalcButton(windowHandle, L"F", UiIds::ButtonF);
+        CreateCalcButton(windowHandle, L".", UiIds::ButtonDot);
+
+        CreateCalcButton(windowHandle, L"=", UiIds::ButtonEq);
+
+        SwitchMode(0);
+
+        LayoutControls(windowHandle);
+        SetFocus(windowHandle);
         UpdateDisplay();
+        return 0;
+    }
+
+    case WM_SIZE:
+        LayoutControls(windowHandle);
+        return 0;
+
+    case WM_GETMINMAXINFO:
+    {
+        MINMAXINFO* minMaxInfo = reinterpret_cast<MINMAXINFO*>(lParam);
+        RECT minimumRect{ 0, 0, MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT };
+
+        const DWORD style = static_cast<DWORD>(GetWindowLongPtr(windowHandle, GWL_STYLE));
+        const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtr(windowHandle, GWL_EXSTYLE));
+        AdjustWindowRectEx(&minimumRect, style, GetMenu(windowHandle) != nullptr, exStyle);
+
+        minMaxInfo->ptMinTrackSize.x = minimumRect.right - minimumRect.left;
+        minMaxInfo->ptMinTrackSize.y = minimumRect.bottom - minimumRect.top;
         return 0;
     }
 
     case WM_COMMAND:
     {
-        int buttonId = LOWORD(wParam);
+        int commandId = LOWORD(wParam);
 
-        switch (buttonId)
+        if (IsCalculatorButtonId(commandId))
         {
-        case ID_BTN_0: AppendDigit(L'0'); break;
-        case ID_BTN_1: AppendDigit(L'1'); break;
-        case ID_BTN_2: AppendDigit(L'2'); break;
-        case ID_BTN_3: AppendDigit(L'3'); break;
-        case ID_BTN_4: AppendDigit(L'4'); break;
-        case ID_BTN_5: AppendDigit(L'5'); break;
-        case ID_BTN_6: AppendDigit(L'6'); break;
-        case ID_BTN_7: AppendDigit(L'7'); break;
-        case ID_BTN_8: AppendDigit(L'8'); break;
-        case ID_BTN_9: AppendDigit(L'9'); break;
-        case ID_BTN_DOT: AppendDot(); break;
-        case ID_BTN_BCK: BackspaceInput(); break;
+            PerformButtonAction(windowHandle, commandId);
+            return 0;
+        }
 
-        case ID_BTN_ADD: SetOperation(L'+'); break;
-        case ID_BTN_SUB: SetOperation(L'-'); break;
-        case ID_BTN_MUL: SetOperation(L'*'); break;
-        case ID_BTN_DIV: SetOperation(L'/'); break;
+        if (commandId == UiIds::ComboDataType && HIWORD(wParam) == CBN_SELCHANGE)
+        {
+            int selection = (int)SendMessageW(hTypeComboBox, CB_GETCURSEL, 0, 0);
+            DataType oldType = currentDataType;
+            currentDataType = static_cast<DataType>(selection);
+            ConvertCurrentValueToType(oldType, currentDataType);
+            return 0;
+        }
 
-        case ID_BTN_EQ:
-            if (currentOperator != 0)
-                Calculate();
-            break;
+        switch (commandId)
+        {
+        case UiIds::MenuModeBasic:
+            SwitchMode(0);
+            return 0;
 
-        case ID_BTN_CLR:
+        case UiIds::MenuModeProgrammer:
+            SwitchMode(1);
+            return 0;
+
+        case UiIds::MenuBaseDec:
+        case UiIds::MenuBaseHex:
+        case UiIds::MenuBaseOct:
+        case UiIds::MenuBaseBin:
+            if (programmerMode)
+            {
+                DisplayBase base = DisplayBase::Decimal;
+                if (commandId == UiIds::MenuBaseHex) base = DisplayBase::Hexadecimal;
+                else if (commandId == UiIds::MenuBaseOct) base = DisplayBase::Octal;
+                else if (commandId == UiIds::MenuBaseBin) base = DisplayBase::Binary;
+
+                ChangeBase(windowHandle, base);
+            }
+            return 0;
+
+        case UiIds::MenuEditClear:
             ClearAll();
-            break;
+            SetFocus(windowHandle);
+            return 0;
+
+        case UiIds::MenuWindowTopMost:
+            windowAlwaysOnTop = !windowAlwaysOnTop;
+            CheckMenuItem(GetMenu(windowHandle), UiIds::MenuWindowTopMost,
+                         windowAlwaysOnTop ? (MF_BYCOMMAND | MF_CHECKED) : (MF_BYCOMMAND | MF_UNCHECKED));
+            SetWindowPos(windowHandle, windowAlwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+                        0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            return 0;
+
+        case CommandCopy:
+            CopyToClip(windowHandle);
+            return 0;
+
+        case CommandPaste:
+            PasteFromClip(windowHandle);
+            return 0;
         }
 
         return 0;
     }
 
+    case WM_KEYDOWN:
+        switch (wParam)
+        {
+        case VK_ESCAPE:
+            ClearAll();
+            return 0;
+        case VK_RETURN:
+            if (currentOperator != 0)
+                Calculate();
+            return 0;
+        case VK_BACK:
+            BackspaceInput();
+            return 0;
+        }
+        break;
+
+    case WM_CHAR:
+    {
+        wchar_t key = static_cast<wchar_t>(wParam);
+
+        bool handled = programmerMode ? HandleProgrammerChar(key) : HandleBasicChar(key);
+        if (handled)
+            return 0;
+
+        break;
+    }
+    break;
+
+    case WM_SETFOCUS:
+        SetFocus(windowHandle);
+        return 0;
+
     case WM_DESTROY:
+        if (hAccelerators)
+        {
+            DestroyAcceleratorTable(hAccelerators);
+            hAccelerators = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -323,44 +454,67 @@ LRESULT CALLBACK WndProc(HWND windowHandle, UINT message, WPARAM wParam, LPARAM 
 
 int WINAPI wWinMain(HINSTANCE instanceHandle, HINSTANCE, PWSTR, int showCommand)
 {
-    const wchar_t WINDOW_CLASS_NAME[] = L"SimpleWinApiCalculator";
+    WNDCLASSEXW displayClass{};
+    displayClass.cbSize = sizeof(displayClass);
+    displayClass.style = CS_HREDRAW | CS_VREDRAW;
+    displayClass.lpfnWndProc = DisplayWndProc;
+    displayClass.hInstance = instanceHandle;
+    displayClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    displayClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    displayClass.lpszClassName = DISPLAY_CLASS_NAME;
+    RegisterClassExW(&displayClass);
 
-    WNDCLASSW windowClass = {};
-    windowClass.lpfnWndProc = WndProc;
+    WNDCLASSEXW bitDisplayClass{};
+    bitDisplayClass.cbSize = sizeof(bitDisplayClass);
+    bitDisplayClass.style = CS_HREDRAW | CS_VREDRAW;
+    bitDisplayClass.lpfnWndProc = BitDisplayWndProc;
+    bitDisplayClass.hInstance = instanceHandle;
+    bitDisplayClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    bitDisplayClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    bitDisplayClass.lpszClassName = BIT_DISPLAY_CLASS_NAME;
+    RegisterClassExW(&bitDisplayClass);
+
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.lpfnWndProc = MainWndProc;
     windowClass.hInstance = instanceHandle;
-    windowClass.lpszClassName = WINDOW_CLASS_NAME;
+    windowClass.hIcon = LoadIconW(instanceHandle, MAKEINTRESOURCEW(IDI_CALCULATOR));
     windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
     windowClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    windowClass.lpszClassName = MAIN_CLASS_NAME;
+    windowClass.hIconSm = LoadIconW(instanceHandle, MAKEINTRESOURCEW(IDI_SMALL));
+    RegisterClassExW(&windowClass);
 
-    RegisterClassW(&windowClass);
-
-    const DWORD windowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-    RECT windowRectangle = { 0, 0, 320, 400 };
-    AdjustWindowRect(&windowRectangle, windowStyle, FALSE);
+    const DWORD windowStyle = WS_OVERLAPPEDWINDOW;
+    RECT windowRectangle = { 0, 0, MIN_CLIENT_WIDTH, MIN_CLIENT_HEIGHT };
+    AdjustWindowRectEx(&windowRectangle, windowStyle, TRUE, 0);
 
     HWND mainWindow = CreateWindowExW(
-        0,
-        WINDOW_CLASS_NAME,
-        L"DevCalc",
+        0, MAIN_CLASS_NAME, L"DevCalc",
         windowStyle,
         CW_USEDEFAULT, CW_USEDEFAULT,
         windowRectangle.right - windowRectangle.left,
         windowRectangle.bottom - windowRectangle.top,
-        nullptr, nullptr, instanceHandle, nullptr
-    );
+        nullptr, nullptr, instanceHandle, nullptr);
 
     if (!mainWindow)
         return 0;
 
+    hAccelerators = CreateApplicationAccelerators();
+
     ShowWindow(mainWindow, showCommand == SW_HIDE ? SW_SHOWNORMAL : showCommand);
     UpdateWindow(mainWindow);
 
-    MSG windowMessage = {};
-    while (GetMessageW(&windowMessage, nullptr, 0, 0))
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0))
     {
-        TranslateMessage(&windowMessage);
-        DispatchMessageW(&windowMessage);
+        if (!hAccelerators || !TranslateAcceleratorW(mainWindow, hAccelerators, &message))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
     }
 
-    return 0;
+    return static_cast<int>(message.wParam);
 }
