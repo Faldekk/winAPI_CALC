@@ -74,6 +74,8 @@ extern wchar_t currentOperator;
 extern bool waitingForSecondOperand;
 extern bool justCalculated;
 extern bool programmerMode;
+extern HWND hToolTip;
+extern int hoveredBit;
 
 void UpdateDisplay();
 void UpdatePrecisionWarning();

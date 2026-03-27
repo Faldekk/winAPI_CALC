@@ -4,9 +4,9 @@
 #include <windowsx.h>
 #include <algorithm>
 
-const wchar_t MAIN_CLASS_NAME[] = L"SimpleWinApiCalculator";
-const wchar_t DISPLAY_CLASS_NAME[] = L"CalcDisplayControl";
-const wchar_t BIT_DISPLAY_CLASS_NAME[] = L"BitDisplayControl";
+const wchar_t MAIN_CLASS_NAME[] = L"DevCalculator";
+const wchar_t DISPLAY_CLASS_NAME[] = L"Controls";
+const wchar_t BIT_DISPLAY_CLASS_NAME[] = L"BitDisplay";
 
 namespace
 {
